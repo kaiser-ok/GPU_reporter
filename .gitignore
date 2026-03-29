@@ -1,0 +1,14 @@
+# Binaries
+go/vllm-monitor
+go/vllm-monitor-arm64
+go/config.yaml
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.claude/
+
+# Logs
+*.log

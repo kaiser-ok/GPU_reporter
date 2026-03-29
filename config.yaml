@@ -1,0 +1,11 @@
+port: 9100
+
+services:
+  - name: vllm-gpt-oss-120b
+    type: vllm
+    url: http://127.0.0.1:8000
+
+  - name: vllm-bge-m3
+    type: vllm
+    url: http://127.0.0.1:8001
+
