@@ -12,12 +12,35 @@ import (
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	detect := flag.Bool("detect", false, "force re-detect services and regenerate config")
+	scanPorts := flag.String("scan-ports", "", "port range to scan for vLLM (e.g. 8000-8010)")
 	flag.Parse()
 
-	// Auto-detect if config doesn't exist or --detect flag
-	if *detect || !fileExists(*configPath) {
+	// Auto-detect if config doesn't exist, --detect flag, or --scan-ports given
+	if *detect || *scanPorts != "" || !fileExists(*configPath) {
 		log.Println("Detecting services...")
 		services := detectServices()
+
+		// Port-range scan for Docker / non-proc-visible vLLM instances
+		if *scanPorts != "" {
+			start, end, err := parsePortRange(*scanPorts)
+			if err != nil {
+				log.Fatalf("Invalid --scan-ports value: %v", err)
+			}
+			log.Printf("Scanning ports %d-%d for vLLM...", start, end)
+			scanned := scanForVllm(start, end)
+
+			// Merge: skip scanned services already found via /proc
+			seen := make(map[string]bool)
+			for _, s := range services {
+				seen[s.URL] = true
+			}
+			for _, s := range scanned {
+				if !seen[s.URL] {
+					services = append(services, s)
+				}
+			}
+		}
+
 		if len(services) == 0 {
 			log.Println("Warning: no vLLM or Ollama services detected")
 		} else {

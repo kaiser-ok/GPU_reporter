@@ -1,6 +1,4 @@
-# Binaries
-go/vllm-monitor
-go/vllm-monitor-arm64
+# Runtime config
 go/config.yaml
 
 # Python

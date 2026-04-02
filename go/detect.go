@@ -2,11 +2,75 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// scanForVllm probes each port in the range by hitting /metrics and looking
+// for the vllm: metric prefix. This finds vLLM instances running in Docker
+// or otherwise invisible to /proc scanning.
+func scanForVllm(portStart, portEnd int) []ServiceConfig {
+	var services []ServiceConfig
+	client := &http.Client{Timeout: 1 * time.Second}
+	modelRe := regexp.MustCompile(`model_name="([^"]+)"`)
+
+	for port := portStart; port <= portEnd; port++ {
+		url := fmt.Sprintf("http://127.0.0.1:%d/metrics", port)
+		resp, err := client.Get(url)
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != 200 {
+			continue
+		}
+
+		text := string(body)
+		if !strings.Contains(text, "vllm:") {
+			continue
+		}
+
+		// Try to extract model name from metric labels
+		model := "unknown"
+		if m := modelRe.FindStringSubmatch(text); m != nil {
+			model = m[1]
+		}
+
+		services = append(services, ServiceConfig{
+			Name: fmt.Sprintf("vllm-%s", model),
+			Type: "vllm",
+			URL:  fmt.Sprintf("http://127.0.0.1:%d", port),
+		})
+	}
+	return services
+}
+
+// parsePortRange parses "START-END" into two ints. Single port "8000" is also accepted.
+func parsePortRange(s string) (int, int, error) {
+	parts := strings.SplitN(s, "-", 2)
+	start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid port range start: %w", err)
+	}
+	if len(parts) == 1 {
+		return start, start, nil
+	}
+	end, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid port range end: %w", err)
+	}
+	if end < start {
+		return 0, 0, fmt.Errorf("port range end (%d) < start (%d)", end, start)
+	}
+	return start, end, nil
+}
 
 func detectServices() []ServiceConfig {
 	var services []ServiceConfig
