@@ -40,7 +40,7 @@ func scanForVllm(portStart, portEnd int) []ServiceConfig {
 		// Try to extract model name from metric labels
 		model := "unknown"
 		if m := modelRe.FindStringSubmatch(text); m != nil {
-			model = m[1]
+			model = filepath.Base(m[1])
 		}
 
 		services = append(services, ServiceConfig{
@@ -72,9 +72,37 @@ func parsePortRange(s string) (int, int, error) {
 	return start, end, nil
 }
 
+// probeVllm checks if a URL serves vLLM metrics.
+func probeVllm(url string, client *http.Client) bool {
+	resp, err := client.Get(strings.TrimRight(url, "/") + "/metrics")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return false
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(body), "vllm:")
+}
+
+// probeOllama checks if a URL serves the Ollama API.
+func probeOllama(url string, client *http.Client) bool {
+	resp, err := client.Get(strings.TrimRight(url, "/") + "/api/version")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
 func detectServices() []ServiceConfig {
 	var services []ServiceConfig
 	seen := make(map[string]bool) // dedup by type+port
+	client := &http.Client{Timeout: 1 * time.Second}
 
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -107,7 +135,14 @@ func detectServices() []ServiceConfig {
 			key := svc.Type + ":" + svc.URL
 			if !seen[key] {
 				seen[key] = true
-				services = append(services, svc)
+				// Verify the service is actually reachable on the host
+				// (container processes show up in /proc but their ports
+				// may not match host-mapped ports)
+				if probeVllm(svc.URL, client) {
+					services = append(services, svc)
+				} else {
+					fmt.Printf("  Skipping %s at %s (not reachable on host)\n", svc.Name, svc.URL)
+				}
 			}
 		}
 
@@ -115,7 +150,11 @@ func detectServices() []ServiceConfig {
 			key := svc.Type + ":" + svc.URL
 			if !seen[key] {
 				seen[key] = true
-				services = append(services, svc)
+				if probeOllama(svc.URL, client) {
+					services = append(services, svc)
+				} else {
+					fmt.Printf("  Skipping %s at %s (not reachable on host)\n", svc.Name, svc.URL)
+				}
 			}
 		}
 	}
