@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,7 +35,22 @@ var (
 	prevStore = make(map[string]prevState)
 )
 
+// resetVllmState drops any cached delta state for a given service URL.
+// Called when a service is removed from the registry so a future re-addition
+// on the same URL (e.g. vLLM restarted) doesn't compute a huge bogus delta
+// against stale counters.
+func resetVllmState(url string) {
+	prevMu.Lock()
+	delete(prevStore, url)
+	prevMu.Unlock()
+}
+
 var metricLineRe = regexp.MustCompile(`^([a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[^}]*\})?)\s+([\d.eE+\-]+)`)
+
+// modelNameRe extracts the live model_name="..." label from vLLM metric text,
+// so ServiceResult.Name reflects whatever model is currently loaded rather than
+// whatever was cached in config.yaml at detection time.
+var modelNameRe = regexp.MustCompile(`model_name="([^"]+)"`)
 
 func parsePrometheusText(text string) map[string]float64 {
 	result := make(map[string]float64)
@@ -105,8 +121,16 @@ func collectVllm(svc ServiceConfig, client *http.Client) ServiceResult {
 		return unreachableResult(svc, "vllm")
 	}
 
-	parsed := parsePrometheusText(string(body))
+	text := string(body)
+	parsed := parsePrometheusText(text)
 	now := float64(time.Now().UnixMilli()) / 1000.0
+
+	// Resolve live model name from metric labels; falls back to the cached
+	// config name if the label is missing (e.g. unusual vLLM build).
+	name := svc.Name
+	if m := modelNameRe.FindStringSubmatch(text); m != nil {
+		name = "vllm-" + filepath.Base(m[1])
+	}
 
 	// Core state
 	running := getMetric(parsed, `^vllm:num_requests_running\{`)
@@ -149,9 +173,11 @@ func collectVllm(svc ServiceConfig, client *http.Client) ServiceResult {
 	var d4xx, d5xx *int
 	var errRatePct *float64
 
+	// Key by URL, not Name, so delta state survives a model swap
+	// (Name is now derived from live metrics and can change over time).
 	prevMu.Lock()
-	prev, hasPrev := prevStore[svc.Name]
-	prevStore[svc.Name] = prevState{counters: counters, ts: now}
+	prev, hasPrev := prevStore[svc.URL]
+	prevStore[svc.URL] = prevState{counters: counters, ts: now}
 	prevMu.Unlock()
 
 	if hasPrev {
@@ -204,7 +230,7 @@ func collectVllm(svc ServiceConfig, client *http.Client) ServiceResult {
 	health := evaluateVllmHealth(metrics)
 
 	return ServiceResult{
-		Name: svc.Name, Type: "vllm", URL: svc.URL,
+		Name: name, Type: "vllm", URL: svc.URL,
 		Reachable: true, Health: health, Metrics: metrics,
 	}
 }

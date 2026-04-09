@@ -14,8 +14,14 @@ type ServiceConfig struct {
 }
 
 type Config struct {
-	Port     int             `yaml:"port"`
-	Services []ServiceConfig `yaml:"services"`
+	Port int `yaml:"port"`
+	// ScanPorts, if set (e.g. "8000-8010"), enables port-range scanning
+	// for vLLM instances during both startup and the periodic rediscover loop.
+	ScanPorts string `yaml:"scan_ports,omitempty"`
+	// RescanInterval is a Go duration string (e.g. "30m"). Defaults to 30m.
+	// Set to "0" to disable the background rediscover loop.
+	RescanInterval string          `yaml:"rescan_interval,omitempty"`
+	Services       []ServiceConfig `yaml:"services"`
 }
 
 func loadConfig(path string) (*Config, error) {

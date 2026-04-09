@@ -7,12 +7,13 @@ import (
 	"time"
 )
 
-func handleStatus(cfg *Config, client *http.Client) http.HandlerFunc {
+func handleStatus(reg *Registry, client *http.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		services := reg.Snapshot()
 		var wg sync.WaitGroup
-		results := make([]ServiceResult, len(cfg.Services))
+		results := make([]ServiceResult, len(services))
 
-		for i, svc := range cfg.Services {
+		for i, svc := range services {
 			wg.Add(1)
 			go func(idx int, s ServiceConfig) {
 				defer wg.Done()

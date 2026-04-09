@@ -9,37 +9,21 @@ import (
 	"time"
 )
 
+const defaultRescanInterval = 30 * time.Minute
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	detect := flag.Bool("detect", false, "force re-detect services and regenerate config")
-	scanPorts := flag.String("scan-ports", "", "port range to scan for vLLM (e.g. 8000-8010)")
+	scanPorts := flag.String("scan-ports", "", "port range to scan for vLLM (e.g. 8000-8010); overrides config for this run")
 	flag.Parse()
 
 	// Auto-detect if config doesn't exist, --detect flag, or --scan-ports given
 	if *detect || *scanPorts != "" || !fileExists(*configPath) {
 		log.Println("Detecting services...")
-		services := detectServices()
-
-		// Port-range scan for Docker / non-proc-visible vLLM instances
 		if *scanPorts != "" {
-			start, end, err := parsePortRange(*scanPorts)
-			if err != nil {
-				log.Fatalf("Invalid --scan-ports value: %v", err)
-			}
-			log.Printf("Scanning ports %d-%d for vLLM...", start, end)
-			scanned := scanForVllm(start, end)
-
-			// Merge: skip scanned services already found via /proc
-			seen := make(map[string]bool)
-			for _, s := range services {
-				seen[s.URL] = true
-			}
-			for _, s := range scanned {
-				if !seen[s.URL] {
-					services = append(services, s)
-				}
-			}
+			log.Printf("Scanning ports %s for vLLM...", *scanPorts)
 		}
+		services := discoverAll(*scanPorts)
 
 		if len(services) == 0 {
 			log.Println("Warning: no vLLM or Ollama services detected")
@@ -63,10 +47,29 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	// CLI --scan-ports overrides config for the lifetime of this process
+	// (not persisted; set scan_ports in config.yaml to make it permanent).
+	effectiveScanPorts := cfg.ScanPorts
+	if *scanPorts != "" {
+		effectiveScanPorts = *scanPorts
+	}
+
+	interval := defaultRescanInterval
+	if cfg.RescanInterval != "" {
+		d, err := time.ParseDuration(cfg.RescanInterval)
+		if err != nil {
+			log.Fatalf("Invalid rescan_interval %q: %v", cfg.RescanInterval, err)
+		}
+		interval = d
+	}
+
+	registry := NewRegistry(cfg.Services)
+	registry.StartRediscoverLoop(effectiveScanPorts, interval)
+
 	client := &http.Client{Timeout: 3 * time.Second}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /status", handleStatus(cfg, client))
+	mux.HandleFunc("GET /status", handleStatus(registry, client))
 	mux.HandleFunc("GET /gpu", handleGpu)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.Port)

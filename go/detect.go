@@ -6,19 +6,46 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
+// discoverAll runs /proc detection and, if scanPorts is non-empty, a vLLM
+// port-range scan, merging the two by URL (proc results win on conflict).
+// Used by both initial startup and the background rediscover loop.
+func discoverAll(scanPorts string) []ServiceConfig {
+	services := detectServices()
+	if scanPorts == "" {
+		return services
+	}
+	start, end, err := parsePortRange(scanPorts)
+	if err != nil {
+		return services
+	}
+	scanned := scanForVllm(start, end)
+	seen := make(map[string]bool, len(services))
+	for _, s := range services {
+		seen[s.URL] = true
+	}
+	for _, s := range scanned {
+		if !seen[s.URL] {
+			services = append(services, s)
+		}
+	}
+	return services
+}
+
 // scanForVllm probes each port in the range by hitting /metrics and looking
 // for the vllm: metric prefix. This finds vLLM instances running in Docker
 // or otherwise invisible to /proc scanning.
+//
+// The model name is intentionally not captured here — it's resolved live by
+// collectVllm on every scrape so a model swap is picked up without re-running
+// detection.
 func scanForVllm(portStart, portEnd int) []ServiceConfig {
 	var services []ServiceConfig
 	client := &http.Client{Timeout: 1 * time.Second}
-	modelRe := regexp.MustCompile(`model_name="([^"]+)"`)
 
 	for port := portStart; port <= portEnd; port++ {
 		url := fmt.Sprintf("http://127.0.0.1:%d/metrics", port)
@@ -32,19 +59,12 @@ func scanForVllm(portStart, portEnd int) []ServiceConfig {
 			continue
 		}
 
-		text := string(body)
-		if !strings.Contains(text, "vllm:") {
+		if !strings.Contains(string(body), "vllm:") {
 			continue
 		}
 
-		// Try to extract model name from metric labels
-		model := "unknown"
-		if m := modelRe.FindStringSubmatch(text); m != nil {
-			model = filepath.Base(m[1])
-		}
-
 		services = append(services, ServiceConfig{
-			Name: fmt.Sprintf("vllm-%s", model),
+			Name: "vllm",
 			Type: "vllm",
 			URL:  fmt.Sprintf("http://127.0.0.1:%d", port),
 		})
@@ -176,15 +196,6 @@ func detectVllm(args []string) (ServiceConfig, bool) {
 		return ServiceConfig{}, false
 	}
 
-	// Extract model path (first arg after "serve" that doesn't start with -)
-	model := "unknown"
-	for _, a := range args[serveIdx+1:] {
-		if !strings.HasPrefix(a, "-") {
-			model = filepath.Base(a)
-			break
-		}
-	}
-
 	// Extract --port
 	port := "8000"
 	for i, a := range args {
@@ -194,8 +205,10 @@ func detectVllm(args []string) (ServiceConfig, bool) {
 		}
 	}
 
+	// Name is a placeholder; collectVllm resolves the live model name from
+	// /metrics on every scrape so a model swap is reflected without re-detect.
 	return ServiceConfig{
-		Name: fmt.Sprintf("vllm-%s", model),
+		Name: "vllm",
 		Type: "vllm",
 		URL:  fmt.Sprintf("http://127.0.0.1:%s", port),
 	}, true
