@@ -40,6 +40,15 @@ func handleStatus(reg *Registry, client *http.Client) http.HandlerFunc {
 			Services:  results,
 		}
 
+		for _, s := range results {
+			if !s.Reachable {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				json.NewEncoder(w).Encode(resp)
+				return
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
